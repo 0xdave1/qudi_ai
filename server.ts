@@ -9,6 +9,7 @@ import { userService } from './server/services/userService';
 import { supportService } from './server/services/supportService';
 import { whatsappService } from './server/services/whatsappService';
 import { runAutomatedTests } from './server/tests/botEngine.test';
+import { checkDatabaseHealth, seedDatabaseIfEmpty, getCachedDatabaseStatus } from './server/db/prisma';
 
 dotenv.config({ override: true });
 
@@ -16,7 +17,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-// Keep raw body for signature verification if needed
+
+// Enable CORS for all external origins (Meta, browsers, test clients)
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Hub-Signature-256');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// Parse urlencoded bodies and keep raw body for HMAC signature verification
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json({
   verify: (req: any, _res, buf) => {
     req.rawBody = buf.toString('utf-8');
@@ -25,46 +39,91 @@ app.use(express.json({
 
 const PORT = Number(process.env.PORT) || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
-let currentVerifyToken = (process.env.WHATSAPP_VERIFY_TOKEN || 'qudi_axra_whatsapp_verify_token_2026').trim();
+let currentVerifyToken = (process.env.WHATSAPP_VERIFY_TOKEN || 'qudi_axra_whatsapp_verify_token_2026').replace(/^["']|["']$/g, '').trim();
 
 // ==========================================
 // 1. REAL WHATSAPP CLOUD API WEBHOOK ENDPOINTS
 // ==========================================
 
+const WEBHOOK_PATHS = ['/webhook', '/webhook/', '/api/webhook', '/api/webhook/'];
+
+// OPTIONS pre-flight
+app.options(WEBHOOK_PATHS, (_req: Request, res: Response) => {
+  res.sendStatus(200);
+});
+
 /**
  * Meta Webhook Verification Handshake
  * Triggered when developer enters Callback URL in Meta Developer Dashboard
  */
-app.get('/webhook', (req: Request, res: Response) => {
-  const mode = (req.query['hub.mode'] || (req.query as any)?.hub?.mode) as string | undefined;
-  const token = (req.query['hub.verify_token'] || (req.query as any)?.hub?.verify_token) as string | undefined;
-  const challenge = (req.query['hub.challenge'] || (req.query as any)?.hub?.challenge) as string | undefined;
+app.get(WEBHOOK_PATHS, (req: Request, res: Response) => {
+  // Helper to extract parameter across different naming conventions
+  const extractQueryParam = (...keys: string[]): string | undefined => {
+    for (const key of keys) {
+      const val = req.query[key] ?? (req.query as any)?.hub?.[key.replace('hub.', '')];
+      if (val !== undefined && val !== null) {
+        const str = Array.isArray(val) ? String(val[0]) : String(val);
+        return str.replace(/^["']|["']$/g, '').trim();
+      }
+    }
+    return undefined;
+  };
 
-  const expectedToken = (process.env.WHATSAPP_VERIFY_TOKEN || currentVerifyToken || 'qudi_axra_whatsapp_verify_token_2026').trim();
-  const isMatch = token && (token === expectedToken || token === currentVerifyToken || token === 'qudi_axra_whatsapp_verify_token_2026' || token === 'qudi_verify_2026_token');
+  const mode = extractQueryParam('hub.mode', 'hub_mode', 'mode');
+  const token = extractQueryParam('hub.verify_token', 'hub_verify_token', 'verify_token');
+  const challenge = extractQueryParam('hub.challenge', 'hub_challenge', 'challenge');
+
+  // Browser check fallback for developers testing the endpoint directly in a browser
+  if (!mode && !token && !challenge) {
+    const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
+    const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+    const currentOrigin = `${proto}://${host}`;
+    return res.status(200).json({
+      status: 'ONLINE',
+      endpoint: '/webhook',
+      message: 'Meta WhatsApp Cloud API Webhook endpoint is active and unauthenticated public-access ready.',
+      activeVerifyToken: currentVerifyToken,
+      suggestedCallbackUrl: `${currentOrigin}/webhook`,
+      publicSharedCallbackUrl: 'https://ais-pre-pclekuvfazg27rxlkjk4es-482451006325.europe-west3.run.app/webhook',
+      metaVerificationDoc: 'Enter the Callback URL and Verify Token in Meta Developer Console -> WhatsApp -> Configuration -> Webhook.',
+      testUrl: `${currentOrigin}/webhook?hub.mode=subscribe&hub.verify_token=${currentVerifyToken}&hub.challenge=1158201244`
+    });
+  }
+
+  const expectedToken = (process.env.WHATSAPP_VERIFY_TOKEN || currentVerifyToken || 'qudi_axra_whatsapp_verify_token_2026').replace(/^["']|["']$/g, '').trim();
+  
+  const acceptableTokens = new Set([
+    expectedToken,
+    currentVerifyToken,
+    'qudi_axra_whatsapp_verify_token_2026',
+    'qudi_verify_2026_token',
+  ]);
+
+  const isMatch = Boolean(token && acceptableTokens.has(token.trim()));
 
   whatsappService.logEvent({
     direction: 'INBOUND',
     eventType: 'webhook_verification_handshake',
-    payload: { query: req.query },
+    payload: { query: req.query, parsed: { mode, token, challenge, isMatch } },
     status: isMatch ? 'SUCCESS' : 'ERROR',
   });
 
-  if (mode === 'subscribe' && isMatch && challenge !== undefined) {
+  if (mode?.toLowerCase() === 'subscribe' && isMatch && challenge !== undefined) {
     console.log('[WhatsApp Webhook] Handshake verified successfully with Meta. Echoing challenge:', challenge);
     res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     return res.status(200).send(String(challenge));
   }
 
-  console.warn('[WhatsApp Webhook] Verification token mismatch. Expected:', expectedToken, 'Received:', token);
+  console.warn('[WhatsApp Webhook] Verification token mismatch or invalid mode.', {
+    expected: expectedToken,
+    receivedToken: token,
+    receivedMode: mode,
+  });
   return res.sendStatus(403);
 });
 
-/**
- * Meta Webhook Event Ingestion
- * Receives live incoming messages, button clicks, and delivery receipts from real WhatsApp users
- */
-app.post('/webhook', async (req: Request, res: Response) => {
+app.post(WEBHOOK_PATHS, async (req: Request, res: Response) => {
   const signature = req.headers['x-hub-signature-256'] as string | undefined;
   const rawBody = (req as any).rawBody || JSON.stringify(req.body);
 
@@ -163,17 +222,47 @@ app.post('/webhook', async (req: Request, res: Response) => {
 // ==========================================
 
 // Webhook & Integration Status
-app.get('/api/status', (_req: Request, res: Response) => {
+app.get('/api/status', async (req: Request, res: Response) => {
   const config = whatsappService.getConfigurationStatus();
+  const dbStatus = getCachedDatabaseStatus();
+  const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
+  const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+  const detectedOrigin = `${proto}://${host}`;
+
+  const publicSharedUrl = 'https://ais-pre-pclekuvfazg27rxlkjk4es-482451006325.europe-west3.run.app';
+  const devWorkspaceUrl = 'https://ais-dev-pclekuvfazg27rxlkjk4es-482451006325.europe-west3.run.app';
+
   res.json({
     appName: 'Qudi WhatsApp AI Banking Bot',
-    appUrl: process.env.APP_URL || 'http://localhost:3000',
-    webhookCallbackUrl: `${process.env.APP_URL || 'http://localhost:3000'}/webhook`,
+    appUrl: detectedOrigin,
+    publicAppUrl: publicSharedUrl,
+    devAppUrl: devWorkspaceUrl,
+    webhookCallbackUrl: `${publicSharedUrl}/webhook`,
+    publicWebhookCallbackUrl: `${publicSharedUrl}/webhook`,
+    devWebhookCallbackUrl: `${devWorkspaceUrl}/webhook`,
     verifyToken: currentVerifyToken,
     whatsappConfig: config,
     geminiAiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.length > 5),
     mode: config.isConfigured ? 'LIVE_WHATSAPP_CLOUD_API' : 'DEVELOPMENT_ADAPTER',
+    database: dbStatus,
   });
+});
+
+// Database Health & Telemetry
+app.get('/api/db/status', async (_req: Request, res: Response) => {
+  const status = await checkDatabaseHealth();
+  res.json(status);
+});
+
+// Seed or Re-sync Database
+app.post('/api/db/seed', async (_req: Request, res: Response) => {
+  try {
+    await seedDatabaseIfEmpty();
+    const status = await checkDatabaseHealth();
+    res.json({ success: true, message: 'Database tables verified and seeded', status });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Update Webhook Verify Token dynamically
@@ -188,8 +277,8 @@ app.post('/api/admin/verify-token', (req: Request, res: Response) => {
 });
 
 // Admin Metrics
-app.get('/api/admin/metrics', (_req: Request, res: Response) => {
-  const users = userService.getAllUsers();
+app.get('/api/admin/metrics', async (_req: Request, res: Response) => {
+  const users = await userService.getAllUsersAsync();
   const transactions = transactionService.getAllTransactions();
   const quotes = rateService.getAllQuotes();
   const tickets = supportService.getTickets();
@@ -207,12 +296,14 @@ app.get('/api/admin/metrics', (_req: Request, res: Response) => {
     openSupportTicketCount: tickets.filter((t) => t.status === 'OPEN').length,
     totalVolumeNgn,
     rates: rateService.getRates(),
+    database: getCachedDatabaseStatus(),
   });
 });
 
 // Admin: Users List
-app.get('/api/admin/users', (_req: Request, res: Response) => {
-  res.json(userService.getAllUsers());
+app.get('/api/admin/users', async (_req: Request, res: Response) => {
+  const users = await userService.getAllUsersAsync();
+  res.json(users);
 });
 
 // Admin: Exchange Rates
@@ -387,6 +478,19 @@ app.get('/api/dev/run-tests', async (_req: Request, res: Response) => {
 // 3. SERVER & FRONTEND SERVING
 // ==========================================
 async function startServer() {
+  // Check Neon PostgreSQL database connection
+  try {
+    const dbStatus = await checkDatabaseHealth();
+    if (dbStatus.isConnected) {
+      console.log(`[Neon PostgreSQL] Connected successfully to host: ${dbStatus.host} (${dbStatus.isPooled ? 'Pooled' : 'Direct'})`);
+      await seedDatabaseIfEmpty();
+    } else {
+      console.log('[Neon PostgreSQL] Database status:', dbStatus.error || 'DATABASE_URL not configured. Running in safe fallback mode.');
+    }
+  } catch (err: any) {
+    console.warn('[Database Startup Notice]:', err.message);
+  }
+
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({

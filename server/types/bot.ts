@@ -10,9 +10,13 @@ export type OnboardingStep =
   | 'ACTIVE';
 
 export interface UserProfile {
+  id?: string;
   phone: string; // WhatsApp international phone e.g. "2348031234567" or "22997123456"
+  whatsappPhone?: string; // Schema field alias
   name: string;
+  fullName?: string; // Schema field alias
   language: SupportedLanguage;
+  preferredLanguage?: SupportedLanguage; // Schema field alias
   country: UserCountry;
   onboardingStep: OnboardingStep;
   consentGiven: boolean;

@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { WebhookLogEntry } from '../types/bot';
+import { getPrisma } from '../db/prisma';
 
 export interface WhatsAppButton {
   type: 'reply';
@@ -15,6 +16,7 @@ class WhatsAppService {
   private appSecret: string;
   private logs: WebhookLogEntry[] = [];
   private outboxMessages: Array<{ to: string; text: string; payload: any; timestamp: string }> = [];
+  private processedMessageIds: Set<string> = new Set();
 
   constructor() {
     this.token = process.env.WHATSAPP_TOKEN || '';
@@ -37,22 +39,86 @@ class WhatsAppService {
     };
   }
 
+  public isMessageProcessed(messageId?: string): boolean {
+    if (!messageId) return false;
+    return this.processedMessageIds.has(messageId);
+  }
+
+  public markMessageProcessed(messageId?: string): void {
+    if (!messageId) return;
+    this.processedMessageIds.add(messageId);
+    if (this.processedMessageIds.size > 500) {
+      const first = Array.from(this.processedMessageIds)[0];
+      this.processedMessageIds.delete(first);
+    }
+  }
+
   public verifySignature(rawBody: string, signatureHeader?: string): boolean {
-    if (!this.appSecret) return true; // If app secret not configured in dev, pass
-    if (!signatureHeader) return false;
+    const secret = this.appSecret || process.env.WHATSAPP_APP_SECRET;
+    if (!signatureHeader) {
+      return !secret; // If no signature provided, allow only if no secret configured
+    }
 
-    const [algorithm, signature] = signatureHeader.split('=');
-    if (algorithm !== 'sha256' || !signature) return false;
+    const parts = signatureHeader.split('=');
+    if (parts.length !== 2 || parts[0] !== 'sha256' || !parts[1]) {
+      return false;
+    }
 
+    const signature = parts[1];
     const expectedSignature = crypto
-      .createHmac('sha256', this.appSecret)
+      .createHmac('sha256', secret || 'qudi_app_secret_signature_key')
       .update(rawBody)
       .digest('hex');
 
-    return crypto.timingSafeEqual(
-      Buffer.from(signature, 'utf-8'),
-      Buffer.from(expectedSignature, 'utf-8')
-    );
+    const sigBuffer = Buffer.from(signature, 'utf-8');
+    const expectedBuffer = Buffer.from(expectedSignature, 'utf-8');
+
+    if (sigBuffer.length !== expectedBuffer.length) {
+      return false;
+    }
+
+    return crypto.timingSafeEqual(sigBuffer, expectedBuffer);
+  }
+
+  public async persistMessageToDb(params: {
+    messageId?: string;
+    userPhone: string;
+    direction: 'INBOUND' | 'OUTBOUND';
+    messageType?: string;
+    content: string;
+    rawPayload?: any;
+    status?: string;
+  }): Promise<void> {
+    const prisma = getPrisma();
+    if (prisma) {
+      try {
+        const user = await prisma.user.findUnique({
+          where: { whatsappPhone: params.userPhone },
+        });
+
+        const msgId = params.messageId || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const safePayload = params.rawPayload && typeof params.rawPayload === 'object' ? params.rawPayload : (params.rawPayload ? { data: params.rawPayload } : undefined);
+
+        await prisma.whatsAppMessage.upsert({
+          where: { whatsappMessageId: msgId },
+          update: {
+            status: params.status || 'SUCCESS',
+          },
+          create: {
+            whatsappMessageId: msgId,
+            userId: user?.id,
+            userPhone: params.userPhone,
+            direction: params.direction,
+            messageType: params.messageType || 'text',
+            content: params.content,
+            rawPayload: safePayload,
+            status: params.status || 'SUCCESS',
+          },
+        });
+      } catch (err: any) {
+        console.warn('[WhatsAppService Prisma Message Save Notice]:', err.message);
+      }
+    }
   }
 
   public logEvent(entry: Omit<WebhookLogEntry, 'id' | 'timestamp'>): void {
@@ -120,6 +186,16 @@ class WhatsAppService {
     const timestamp = new Date().toISOString();
     this.outboxMessages.unshift({ to, text: displayText, payload, timestamp });
     if (this.outboxMessages.length > 50) this.outboxMessages.pop();
+
+    // Persist outbound message to Neon PostgreSQL
+    this.persistMessageToDb({
+      userPhone: to,
+      direction: 'OUTBOUND',
+      messageType: payload.type || 'text',
+      content: displayText,
+      rawPayload: payload,
+      status: 'SUCCESS',
+    }).catch(() => {});
 
     if (!this.isConfigured()) {
       // Development adapter: Log the mock send

@@ -39,6 +39,7 @@ export const WebhookConsole: React.FC<WebhookConsoleProps> = ({
   const [tokenSuccess, setTokenSuccess] = useState<string | null>(null);
 
   const webhookUrl = `${window.location.origin}/webhook`;
+  const publicWebhookUrl = statusData?.publicWebhookCallbackUrl || 'https://ais-pre-pclekuvfazg27rxlkjk4es-482451006325.europe-west3.run.app/webhook';
   const verifyToken = statusData?.verifyToken || 'qudi_axra_whatsapp_verify_token_2026';
 
   const handleCopy = (text: string, field: string) => {
@@ -159,22 +160,60 @@ export const WebhookConsole: React.FC<WebhookConsoleProps> = ({
           </div>
         )}
 
-        {/* Credentials Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-          
-          {/* Callback URL */}
-          <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex items-center justify-between text-xs font-mono-nums">
-            <div>
-              <div className="text-[10px] text-slate-500 uppercase tracking-wider">Callback URL</div>
-              <div className="text-emerald-400 font-semibold break-all">{webhookUrl}</div>
+        {/* Meta Error #1006 Notice Box */}
+        <div className="bg-amber-950/40 border border-amber-800/60 rounded-xl p-3 text-xs text-amber-200 flex items-start gap-3">
+          <div className="p-1.5 bg-amber-900/60 rounded-lg text-amber-400 shrink-0 font-bold font-mono">
+            #1006
+          </div>
+          <div className="space-y-1">
+            <div className="font-semibold text-amber-100 flex items-center gap-2">
+              <span>Resolving Meta Callback URL Verification Error #1006</span>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-mono">FIX READY</span>
             </div>
-            <button
-              onClick={() => handleCopy(webhookUrl, 'url')}
-              className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-white rounded transition-colors ml-2 shrink-0 cursor-pointer"
-              title="Copy URL"
-            >
-              {copiedField === 'url' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-            </button>
+            <p className="text-slate-300 leading-relaxed text-[11px]">
+              Meta’s verification crawler cannot reach internal development workspace domains (<code className="text-amber-300 bg-slate-900 px-1 py-0.5 rounded font-mono">ais-dev-*</code>) because they require Google session cookies. 
+              Always use the <strong>Public Shared Callback URL</strong> below which allows unauthenticated public GET handshakes.
+            </p>
+          </div>
+        </div>
+
+        {/* Credentials Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+          
+          {/* Public Callback URL for Meta */}
+          <div className="bg-slate-950 p-3 rounded-xl border border-emerald-900/60 flex flex-col justify-between text-xs font-mono-nums relative group shadow-sm">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
+                <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-wider">
+                  Meta Callback URL (Public)
+                </span>
+              </div>
+              <button
+                onClick={() => handleCopy(publicWebhookUrl, 'publicUrl')}
+                className="py-1 px-2 hover:bg-slate-800 text-emerald-400 hover:text-white rounded transition-colors flex items-center gap-1 text-[11px] font-sans font-medium cursor-pointer"
+                title="Copy Public URL for Meta"
+              >
+                {copiedField === 'publicUrl' ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy URL</span>
+                  </>
+                )}
+              </button>
+            </div>
+            <div className="text-emerald-300 font-semibold break-all text-[11px] bg-slate-900/80 p-2 rounded-lg border border-slate-800 mt-2 select-all">
+              {publicWebhookUrl}
+            </div>
+            <div className="text-[10px] text-slate-400 mt-1.5 flex items-center justify-between">
+              <span>Paste into Meta Developer Dashboard</span>
+              <span className="text-emerald-400 font-medium">Public Unauthenticated</span>
+            </div>
           </div>
 
           {/* Verify Token (Editable) */}

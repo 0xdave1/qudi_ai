@@ -1,0 +1,216 @@
+// This is your Prisma schema file for Qudi - West Africa AI Banking Platform
+// Connected to Neon PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String                @id @default(uuid())
+  whatsappPhone     String                @unique
+  fullName          String?
+  country           String                @default("NG") // NG, BJ
+  preferredLanguage String                @default("en") // en, fr
+  accountStatus     String                @default("ACTIVE") // ACTIVE, SUSPENDED, PENDING
+  kycStatus         String                @default("TIER_1") // UNVERIFIED, TIER_1, TIER_2, TIER_3
+  onboardingStep    String                @default("ACTIVE") // AWAITING_LANGUAGE, AWAITING_NAME, AWAITING_COUNTRY, ACTIVE
+  consentGiven      Boolean               @default(true)
+  isVerified        Boolean               @default(false)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  wallets           Wallet[]
+  quotes            ExchangeQuote[]
+  transactions      Transaction[]
+  messages          WhatsAppMessage[]
+  sessions          ConversationSession[]
+  auditLogs         AuditLog[]
+
+  @@index([whatsappPhone])
+}
+
+model ExchangeRate {
+  id             String    @id @default(uuid())
+  sourceCurrency String    // NGN, XOF
+  targetCurrency String    // XOF, NGN
+  rate           Float
+  rateSource     String    @default("DYNAMIC_MARKET_MAKER")
+  effectiveAt    DateTime  @default(now())
+  expiresAt      DateTime?
+  isActive       Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+
+  @@index([sourceCurrency, targetCurrency, isActive])
+}
+
+model Wallet {
+  id               String   @id @default(uuid())
+  userId           String
+  currency         String   // NGN, XOF
+  availableBalance Float    @default(0)
+  reservedBalance  Float    @default(0)
+  accountNumber    String?
+  bankName         String?
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, currency])
+  @@index([userId])
+}
+
+model ExchangeQuote {
+  id             String   @id @default(uuid())
+  quoteReference String   @unique // QT-XXXXXX
+  userId         String
+  userPhone      String
+  sourceCurrency String   // NGN, XOF
+  targetCurrency String   // XOF, NGN
+  sourceAmount   Float
+  targetAmount   Float
+  exchangeRate   Float
+  feeAmount      Float
+  totalPayable   Float
+  expiresAt      DateTime
+  status         String   @default("PENDING") // PENDING, ACCEPTED, EXPIRED, CANCELLED, COMPLETED
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userPhone])
+  @@index([quoteReference])
+}
+
+model Transaction {
+  id                  String          @id @default(uuid())
+  reference           String          @unique // QX-XXXX-XXXX
+  userId              String
+  userPhone           String
+  quoteId             String?
+  type                String          @default("EXCHANGE") // DEPOSIT, WITHDRAWAL, EXCHANGE, TRANSFER
+  sourceCurrency      String          // NGN, XOF
+  sourceAmount        Float
+  targetCurrency      String          // XOF, NGN
+  targetAmount        Float
+  exchangeRate        Float
+  fee                 Float
+  recipientBank       String?
+  recipientAccount    String?
+  recipientName       String?
+  recipientRail       String?         // NIBSS_NIP, MTN_MOMO, MOOV_MONEY, BANK_TRANSFER
+  recipientPhone      String?
+  paymentReference    String?
+  payoutReference     String?
+  paymentInstructions Json?
+  proofSubmittedAt    DateTime?
+  proofNote           String?
+  adminNote           String?
+  verifiedAt          DateTime?
+  completedAt         DateTime?
+  status              String          @default("INITIATED") // INITIATED, AWAITING_PAYMENT, PAYMENT_VERIFICATION, PROCESSING, COMPLETED, FAILED, CANCELLED
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  paymentRecords PaymentRecord[]
+
+  @@index([userId])
+  @@index([userPhone])
+  @@index([reference])
+  @@index([status])
+}
+
+model PaymentRecord {
+  id                 String       @id @default(uuid())
+  transactionId      String
+  providerReference  String       @unique
+  amount             Float
+  currency           String
+  verificationStatus String       @default("PENDING") // PENDING, VERIFIED, FAILED
+  verifiedAt         DateTime?
+  createdAt          DateTime     @default(now())
+
+  transaction        Transaction  @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@index([providerReference])
+}
+
+model ConversationSession {
+  id                String    @id @default(uuid())
+  userId            String
+  userPhone         String
+  conversationState String    @default("IDLE") // ONBOARDING, AWAITING_QUOTE_CONFIRM, AWAITING_PAYMENT_PROOF, IDLE
+  pendingAction     String?
+  sessionExpiration DateTime?
+  updatedAt         DateTime  @updatedAt
+  createdAt         DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userPhone])
+}
+
+model WhatsAppMessage {
+  id                String   @id @default(uuid())
+  whatsappMessageId String?  @unique
+  userId            String?
+  userPhone         String
+  direction         String   // INBOUND, OUTBOUND
+  messageType       String   @default("text") // text, interactive, button, media
+  content           String
+  rawPayload        Json?
+  status            String   @default("SUCCESS") // SUCCESS, ERROR, PENDING
+  createdAt         DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userPhone])
+  @@index([whatsappMessageId])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  action     String
+  actor      String   // USER, SYSTEM, ADMIN
+  actorId    String?
+  entityType String?
+  entityId   String?
+  userId     String?
+  userPhone  String?
+  riskScore  Float?
+  flags      String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([action])
+  @@index([userId])
+  @@index([entityType, entityId])
+}
+
+model SupportTicket {
+  id           String    @id @default(uuid())
+  ticketNumber String    @unique // TKT-XXXX
+  userPhone    String
+  userName     String
+  subject      String
+  message      String
+  status       String    @default("OPEN") // OPEN, IN_PROGRESS, RESOLVED
+  adminNote    String?
+  createdAt    DateTime  @default(now())
+  resolvedAt   DateTime?
+
+  @@index([userPhone])
+  @@index([status])
+}

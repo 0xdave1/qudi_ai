@@ -8,6 +8,7 @@ import {
   BookOpen,
   CheckCircle,
   AlertTriangle,
+  Database,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -17,6 +18,15 @@ interface HeaderProps {
   pendingVerifications: number;
   openTickets: number;
   verifyToken?: string;
+  databaseStatus?: {
+    isConfigured: boolean;
+    isConnected: boolean;
+    provider: string;
+    host?: string;
+    isPooled?: boolean;
+    latencyMs?: number;
+    error?: string;
+  };
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -26,6 +36,7 @@ export const Header: React.FC<HeaderProps> = ({
   pendingVerifications,
   openTickets,
   verifyToken,
+  databaseStatus,
 }) => {
   return (
     <header className="sticky top-0 z-50 bg-[#090d16]/95 backdrop-blur-md border-b border-slate-800 text-slate-100">
@@ -143,6 +154,22 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Zone 3: Quick Action Indicator */}
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={() => setActiveTab('setup')}
+            className={`text-[11px] font-mono-nums px-2.5 py-1 rounded transition-colors flex items-center gap-1.5 cursor-pointer border ${
+              databaseStatus?.isConnected
+                ? 'bg-emerald-950/60 border-emerald-800/80 text-emerald-300 hover:bg-emerald-900/60'
+                : 'bg-amber-950/60 border-amber-800/80 text-amber-300 hover:bg-amber-900/60'
+            }`}
+            title={databaseStatus?.isConnected ? `Connected to Neon PostgreSQL (${databaseStatus.host})` : 'Neon PostgreSQL: Awaiting DATABASE_URL in AI Studio Secrets'}
+          >
+            <Database className="w-3 h-3" />
+            <span>DB:</span>
+            <strong className={databaseStatus?.isConnected ? 'text-emerald-400' : 'text-amber-400'}>
+              {databaseStatus?.isConnected ? 'Neon Live' : 'Fallback / Setup'}
+            </strong>
+          </button>
+
           <button
             onClick={() => setActiveTab('webhook')}
             className="text-[11px] font-mono-nums bg-slate-900 hover:bg-slate-800 border border-slate-800 px-2.5 py-1 rounded text-slate-300 transition-colors flex items-center gap-1.5 cursor-pointer"

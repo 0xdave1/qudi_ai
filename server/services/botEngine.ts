@@ -18,11 +18,29 @@ class BotEngine {
     text: string;
     messageId?: string;
   }): Promise<{ replyText: string; handledIntent?: string }> {
-    const { from, text } = params;
+    const { from, text, messageId } = params;
     const cleanText = text.trim();
 
-    // 1. Identify or register user
-    const { user, isNew } = this.getOrCreateUser(from);
+    // 0. Deduplicate message
+    if (messageId && whatsappService.isMessageProcessed(messageId)) {
+      console.log(`[BotEngine] Duplicate message ${messageId} ignored.`);
+      return { replyText: '', handledIntent: 'DUPLICATE_IGNORED' };
+    }
+    if (messageId) {
+      whatsappService.markMessageProcessed(messageId);
+    }
+
+    // Persist inbound message to database
+    whatsappService.persistMessageToDb({
+      messageId,
+      userPhone: from,
+      direction: 'INBOUND',
+      messageType: 'text',
+      content: cleanText,
+    }).catch(() => {});
+
+    // 1. Identify or register user (persisted in Neon PostgreSQL)
+    const { user, isNew } = await userService.getOrCreateUserAsync(from);
 
     // 2. Check if in Onboarding
     if (user.onboardingStep !== 'ACTIVE') {
@@ -268,19 +286,20 @@ class BotEngine {
         const recipientAccount = extraction.recipientAccount || (activeQuote.toCurrency === 'NGN' ? 'Zenith / GTBank Account' : '+229 97 12 34 56 (MTN MoMo)');
         const recipientName = extraction.recipientName || user.name;
 
-        const txResult = transactionService.createTransaction({
-          quote: activeQuote,
+        const tx = transactionService.createTransaction({
+          userPhone: user.phone,
+          quoteId: activeQuote.id,
+          fromCurrency: activeQuote.fromCurrency,
+          toCurrency: activeQuote.toCurrency,
+          fromAmount: activeQuote.fromAmount,
+          toAmount: activeQuote.toAmount,
+          rate: activeQuote.rate,
+          fee: activeQuote.fee,
           recipientAccount,
           recipientName,
+          recipientRail: activeQuote.toCurrency === 'NGN' ? 'NIBSS_NIP' : 'MTN_MOMO',
         });
 
-        if (!txResult.success || !txResult.transaction) {
-          const errMsg = isFr ? 'Erreur lors de la création de la transaction.' : (txResult.error || 'Transaction creation failed.');
-          await whatsappService.sendTextMessage(user.phone, errMsg);
-          return { replyText: errMsg, handledIntent: 'TX_ERROR' };
-        }
-
-        const tx = txResult.transaction;
         const pi = tx.paymentInstructions;
 
         const txCreatedMsg = isFr
@@ -313,7 +332,7 @@ class BotEngine {
           return { replyText: noTx, handledIntent: 'NO_PENDING_TX' };
         }
 
-        transactionService.submitPaymentProof(activeTx.reference, user.phone, text);
+        transactionService.submitPaymentProof(activeTx.reference, text);
 
         const proofReceived = isFr
           ? `📩 **Preuve de Paiement Enregistrée !**\nRéférence : **${activeTx.reference}**\nStatut : **En cours de vérification bancaire**\n\nNos équipes et nos passerelles de paiement partenaires vérifient la réception des fonds.\n\n⚠️ *Conformément aux règles de sécurité financière, les fonds du bénéficiaire ne sont débloqués qu'après validation effective sur nos comptes bancaires/MoMo.* Vous recevrez un reçu instantané dès validation.`
@@ -356,7 +375,7 @@ class BotEngine {
         }
 
         const lines = txList.map(
-          (t) =>
+          (t: Transaction) =>
             `• **${t.reference}** : ${t.fromAmount.toLocaleString()} ${t.fromCurrency} → ${t.toAmount.toLocaleString()} ${t.toCurrency} [${t.status}]`
         );
 

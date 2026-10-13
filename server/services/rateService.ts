@@ -1,4 +1,5 @@
 import { Currency, ExchangeQuote, QuoteStatus } from '../types/bot';
+import { getPrisma } from '../db/prisma';
 
 export interface RateConfig {
   xofToNgnRate: number; // 1 XOF = x NGN (e.g. 2.55)
@@ -25,6 +26,31 @@ class RateService {
 
   private quotes: Map<string, ExchangeQuote> = new Map();
 
+  constructor() {
+    this.loadRatesFromDb().catch(() => {});
+  }
+
+  public async loadRatesFromDb(): Promise<void> {
+    const prisma = getPrisma();
+    if (!prisma) return;
+
+    try {
+      const activeRates = await prisma.exchangeRate.findMany({
+        where: { isActive: true },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      const xofNgn = activeRates.find((r) => r.sourceCurrency === 'XOF' && r.targetCurrency === 'NGN');
+      const ngnXof = activeRates.find((r) => r.sourceCurrency === 'NGN' && r.targetCurrency === 'XOF');
+
+      if (xofNgn) this.config.xofToNgnRate = xofNgn.rate;
+      if (ngnXof) this.config.ngnToXofRate = ngnXof.rate;
+      this.config.lastUpdated = new Date().toISOString();
+    } catch (err: any) {
+      console.warn('[RateService Prisma Load Error]:', err.message);
+    }
+  }
+
   public getRates(): RateConfig {
     return { ...this.config };
   }
@@ -35,6 +61,40 @@ class RateService {
       ...partial,
       lastUpdated: new Date().toISOString(),
     };
+
+    // Asynchronously record into Neon PostgreSQL
+    const prisma = getPrisma();
+    if (prisma) {
+      (async () => {
+        try {
+          if (partial.xofToNgnRate) {
+            await prisma.exchangeRate.create({
+              data: {
+                sourceCurrency: 'XOF',
+                targetCurrency: 'NGN',
+                rate: partial.xofToNgnRate,
+                rateSource: 'ADMIN_OVERRIDE',
+                isActive: true,
+              },
+            });
+          }
+          if (partial.ngnToXofRate) {
+            await prisma.exchangeRate.create({
+              data: {
+                sourceCurrency: 'NGN',
+                targetCurrency: 'XOF',
+                rate: partial.ngnToXofRate,
+                rateSource: 'ADMIN_OVERRIDE',
+                isActive: true,
+              },
+            });
+          }
+        } catch (err: any) {
+          console.warn('[RateService Prisma Save Error]:', err.message);
+        }
+      })();
+    }
+
     return this.getRates();
   }
 
@@ -98,7 +158,8 @@ class RateService {
     const toAmount = Math.round(netSource * rate);
 
     const quoteId = `QT-${Date.now().toString().slice(-6)}-${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 10 * 60 * 1000).toISOString(); // 10 minutes lock
 
     const quote: ExchangeQuote = {
       id: quoteId,
@@ -111,46 +172,114 @@ class RateService {
       fee,
       expiresAt,
       status: 'PENDING',
-      createdAt: new Date().toISOString(),
+      createdAt: now.toISOString(),
     };
 
     this.quotes.set(quoteId, quote);
 
-    return { success: true, quote };
+    // Persist to Neon PostgreSQL
+    const prisma = getPrisma();
+    if (prisma) {
+      (async () => {
+        try {
+          // Find user id for relation if exists, or auto-create if missing
+          let user = await prisma.user.findUnique({ where: { whatsappPhone: userPhone } });
+          if (!user) {
+            try {
+              user = await prisma.user.create({
+                data: {
+                  whatsappPhone: userPhone,
+                  fullName: '',
+                  country: userPhone.startsWith('229') ? 'BJ' : 'NG',
+                  preferredLanguage: userPhone.startsWith('229') ? 'fr' : 'en',
+                },
+              });
+            } catch {
+              user = await prisma.user.findUnique({ where: { whatsappPhone: userPhone } });
+            }
+          }
+          if (user) {
+            await prisma.exchangeQuote.upsert({
+              where: { quoteReference: quote.id },
+              update: {
+                status: quote.status || 'PENDING',
+              },
+              create: {
+                quoteReference: quote.id,
+                userId: user.id,
+                userPhone,
+                sourceCurrency: quote.fromCurrency,
+                targetCurrency: quote.toCurrency,
+                sourceAmount: quote.fromAmount,
+                targetAmount: quote.toAmount,
+                exchangeRate: quote.rate,
+                feeAmount: quote.fee,
+                totalPayable: quote.fromAmount,
+                expiresAt: new Date(quote.expiresAt),
+                status: quote.status || 'PENDING',
+              },
+            });
+          }
+        } catch (err: any) {
+          console.warn('[RateService Prisma Quote Save Notice]:', err.message);
+        }
+      })();
+    }
+
+    return {
+      success: true,
+      quote,
+    };
   }
 
-  public getQuote(quoteId: string): ExchangeQuote | undefined {
+  public isQuoteExpired(quote: ExchangeQuote): boolean {
+    return quote.status === 'EXPIRED' || new Date() > new Date(quote.expiresAt);
+  }
+
+  public getQuoteById(quoteId: string): ExchangeQuote | undefined {
     const q = this.quotes.get(quoteId);
     if (!q) return undefined;
-    // Check expiry
-    if (q.status === 'PENDING' && new Date(q.expiresAt).getTime() < Date.now()) {
+
+    // Check expiration
+    if (this.isQuoteExpired(q) && q.status === 'PENDING') {
       q.status = 'EXPIRED';
-      this.quotes.set(quoteId, q);
     }
     return q;
   }
 
   public getLatestActiveQuoteForUser(userPhone: string): ExchangeQuote | undefined {
     const userQuotes = Array.from(this.quotes.values())
-      .filter((q) => q.userPhone === userPhone && q.status === 'PENDING')
+      .filter((q) => q.userPhone === userPhone)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-    if (userQuotes.length === 0) return undefined;
-    const latest = userQuotes[0];
-    if (new Date(latest.expiresAt).getTime() < Date.now()) {
-      latest.status = 'EXPIRED';
-      this.quotes.set(latest.id, latest);
-      return undefined;
+    for (const q of userQuotes) {
+      if (q.status === 'PENDING') {
+        if (new Date() > new Date(q.expiresAt)) {
+          q.status = 'EXPIRED';
+        } else {
+          return q;
+        }
+      }
     }
-    return latest;
+    return undefined;
   }
 
-  public updateQuoteStatus(quoteId: string, status: QuoteStatus): void {
+  public updateQuoteStatus(quoteId: string, status: QuoteStatus): boolean {
     const q = this.quotes.get(quoteId);
     if (q) {
       q.status = status;
-      this.quotes.set(quoteId, q);
+
+      const prisma = getPrisma();
+      if (prisma) {
+        prisma.exchangeQuote.updateMany({
+          where: { quoteReference: quoteId },
+          data: { status },
+        }).catch(() => {});
+      }
+
+      return true;
     }
+    return false;
   }
 
   public getAllQuotes(): ExchangeQuote[] {

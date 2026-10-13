@@ -113,6 +113,7 @@ export default function App() {
         pendingVerifications={pendingVerifications}
         openTickets={openTickets}
         verifyToken={statusData?.verifyToken}
+        databaseStatus={statusData?.database}
       />
 
       {/* Main Content Viewports */}
@@ -155,7 +156,7 @@ export default function App() {
         )}
 
         {activeTab === 'setup' && (
-          <SetupGuide />
+          <SetupGuide databaseStatus={statusData?.database} onRefresh={fetchAllData} />
         )}
       </main>
 
@@ -175,6 +176,10 @@ export default function App() {
             <span>Meta Graph API v21.0</span>
             <span>·</span>
             <span>Gemini 3.8 Flash Intent Orchestration</span>
+            <span>·</span>
+            <span className={statusData?.database?.isConnected ? 'text-emerald-400' : 'text-amber-400'}>
+              {statusData?.database?.isConnected ? 'Neon PostgreSQL (Prisma Live)' : 'Neon PostgreSQL (Awaiting DATABASE_URL)'}
+            </span>
             <span>·</span>
             <span>Webhook: /webhook</span>
           </div>
